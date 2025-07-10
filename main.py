@@ -10,11 +10,11 @@ def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
 
-def sigmoid_window(t, val=0.5):
-    return 1 - sigmoid(10 * (t - val))
+def sigmoid_window(t, val=0.5, gain=40):
+    return 1 - sigmoid(gain * (t - val))
 
 
-def gen_radial_filters(N, levels=3):
+def gen_radial_filters(N, gain=40, levels=3):
     freq_x = np.fft.fftshift(np.fft.fftfreq(N[0], d=1.0))
     freq_y = np.fft.fftshift(np.fft.fftfreq(N[1], d=1.0))
     freq_z = np.fft.fftshift(np.fft.fftfreq(N[2], d=1.0))
@@ -22,9 +22,25 @@ def gen_radial_filters(N, levels=3):
     rho = np.sqrt(omega_x ** 2 + omega_y ** 2 + omega_z ** 2)
 
     fltrs = []
-    ans = sigmoid_window(rho * (2 ** 0))
+    ans = np.ones_like(rho)
     for i in range(1, levels + 1):
-        aux = sigmoid_window(rho * (2 ** i))
+        aux = sigmoid_window(rho * (2 ** i), gain=gain)
+        fltrs.append(ans - aux)
+        ans = aux
+    return fltrs
+
+def gen_radial_squared_filters(N, gain=100, levels=3):
+    freq_x = np.fft.fftshift(np.fft.fftfreq(N[0], d=1.0))
+    freq_y = np.fft.fftshift(np.fft.fftfreq(N[1], d=1.0))
+    freq_z = np.fft.fftshift(np.fft.fftfreq(N[2], d=1.0))
+    omega_x, omega_y, omega_z = np.meshgrid(freq_x, freq_y, freq_z, indexing='ij')
+    omega_x, omega_y, omega_z = np.abs(omega_x), np.abs(omega_y), np.abs(omega_z)
+    fltrs = []
+    ans = np.ones_like(omega_x)
+    for i in range(1, levels + 1):
+        aux = (1.*(np.sqrt(sigmoid_window(omega_x * (2 ** i), gain=gain))>0.5) *
+               1.*(np.sqrt(sigmoid_window(omega_y * (2 ** i), gain=gain))>0.5) *
+               np.sqrt(sigmoid_window(omega_z * (2 ** i), gain=gain)))
         fltrs.append(ans - aux)
         ans = aux
     return fltrs
@@ -38,7 +54,7 @@ def gen_angular_filters(N, levels=3):
 
     for i in range(levels):
         k2 = np.abs(k)
-        new = sigmoid_window(k2, 0.07 * (2 ** i))
+        new = sigmoid_window(k2, val=0.05 * (i+1), gain=100)
         dipoles.append(new - ans)
         ans = new
     return dipoles
@@ -49,12 +65,12 @@ def normalize_filters(filters):
     filters = filters / np.max(sumbank)
     all_space = np.ones_like(filters[..., 0:1])
     residual = all_space - sumbank
-    return np.concatenate([filters, residual], axis=-1)
+    return np.clip(np.concatenate([filters, residual], axis=-1), 0, 1)
 
 
-def gen_dipolets_filters(N):
-    angulars = gen_angular_filters(N)
-    radials = gen_radial_filters(N)
+def gen_dipolets_filters(N, fun_radial=gen_radial_filters, gain=100, angular_levels=3, radial_levels=3):
+    angulars = gen_angular_filters(N, levels=angular_levels)
+    radials = fun_radial(N, gain, levels=radial_levels)
     bank = [a[..., np.newaxis] * r[..., np.newaxis] for a in angulars for r in radials]
     bank = np.concatenate(bank, axis=-1)
     bank = normalize_filters(bank)
@@ -68,12 +84,34 @@ N = [N_x, N_y, N_z]
 
 # %%
 
-bank = gen_dipolets_filters(N)
+flts = gen_angular_filters(N, 5)
+for f in flts:
+    imshow_3d(f, rango=(0, 1))
+
+# %%
+
+flts = gen_radial_filters(N, levels=4)
+for f in flts:
+    imshow_3d(f, rango=(0, 1))
+
+#%%
+flts = gen_radial_squared_filters(N, levels=4)
+for f in flts:
+    imshow_3d(f, rango=(0, 1))
+
+# %%
+
+bank = gen_dipolets_filters(N, fun_radial=gen_radial_filters, angular_levels=3, radial_levels=3, gain=50)
+# bank = gen_dipolets_filters(N, fun_radial=gen_radial_squared_filters, angular_levels=3, radial_levels=3, gain=50)
 print(bank.shape)
 
 # %%
 for i in range(bank.shape[-1]):
     imshow_3d(bank[..., i])
+
+#%%
+imshow_3d(bank[..., -1],  rango=(0, 1))
+imshow_3d(np.sum(bank, axis=-1), rango=(0, 1))
 
 # %%
 
@@ -92,7 +130,7 @@ print(rmse(gt, img, mask))
 ftimg = fftn(img)
 for i in range(bank.shape[-1]):
     aux = np.real(ifftn(ifftshift(bank[..., i]) * ftimg))
-    imshow_3d(bank[..., i], title=f'filtro {i}')
+    imshow_3d(bank[..., i], title=f'filtro {i}' , rango=(0, 1))
     imshow_3d(aux, rango=(-0.1, 0.1), angles=(-90, -90, 90), title=f'filtro {i}')
 
 
@@ -100,7 +138,7 @@ for i in range(bank.shape[-1]):
 
 def transformada_dipolet(img):
     N = img.shape
-    bank = gen_dipolets_filters(N)
+    bank = gen_dipolets_filters(N, fun_radial=gen_radial_squared_filters, angular_levels=3, radial_levels=3, gain=50)
     result = []
     ftimg = fftn(img)
     for i in range(bank.shape[-1]):
@@ -288,20 +326,21 @@ signal = signal + ((1. / snr) * (np.random.randn(*signal.shape) + 1j * np.random
 phase = np.angle(signal).astype(np.float32) / scale
 phase = phase * mask
 
-phase[N_x // 2, N_y // 2, N_z // 2] *= 20
-phase[N_x // 2, N_y // 2 + 1, N_z // 2] *= -20
+phase[N_x // 2, N_y // 2, N_z // 2] *= 10
+phase[N_x // 2, N_y // 2 + 1, N_z // 2] *= -10
 
-phase[N_x // 2, N_y // 2, N_z // 2 + 1] *= 20
-phase[N_x // 2, N_y // 2, N_z // 2] *= -20
+phase[N_x // 2, N_y // 2, N_z // 2 + 1] *= 10
+phase[N_x // 2, N_y // 2, N_z // 2] *= -10
 
-phase[N_x // 2, N_y // 2, N_z // 2] *= 20
-phase[N_x // 2 - 1, N_y // 2 + 1, N_z // 2] *= -20
+phase[N_x // 2, N_y // 2, N_z // 2] *= 10
+phase[N_x // 2 - 1, N_y // 2 + 1, N_z // 2] *= -10
 
 # %%
 
 W = transformada_dipolet
+aux = W(phase)
 W_T = lambda x: np.sum(x, axis=-1)
-M = np.ones((*phase.shape, 10))
+M = np.ones(aux.shape)
 M[:, :, :, -1] = 0
 
 H = lambda x: np.real(ifftn(kernel * fftn(x)))
@@ -331,7 +370,47 @@ imshow_3d(recon_recon2, rango=(-0.1, 0.1), angles=(-90, -90, 90),
           title=f'recon_recon rmse={rmse(gt, recon_recon2, mask):.2f}')
 
 # %%
+
+imshow_3d(recon_baseline-recon_recon2, rango=(-0.1, 0.1), angles=(-90, -90, 90),
+          title=f'Baseline - dipolet')
+
+# %%
+trd = transformada_dipolet(phase)
+
+for i in range(trd.shape[-1]):
+    imshow_3d(trd[..., i], title=f'{i}', rango=(-0.1, 0.1), angles=(-90, -90, 90))
+imshow_3d(trd[..., -1], title=f'{i}', rango=(-0.1, 0.1), angles=(-90, -90, 90))
+
+imshow_3d(np.sum(trd, axis=-1), title=f'{i}', rango=(-0.1, 0.1), angles=(-90, -90, 90))
+
+
+#%%
+
+recon_baseline, steps = ndi(phase, 10, H=H, H_T=H_T, true_image=gt,
+                            verbose=True, steps_return=True)
+
+imshow_3d(recon_baseline, rango=(-0.1, 0.1), angles=(-90, -90, 90),
+          title=f'NDI rmse={rmse(gt, recon_baseline, mask):.2f}')
+
+#%%
+
 trd = transformada_dipolet(recon_baseline)
 
 for i in range(trd.shape[-1]):
     imshow_3d(trd[..., i], title=f'{i}', rango=(-0.1, 0.1), angles=(-90, -90, 90))
+# imshow_3d(trd[..., -1], title=f'{i}', rango=(-0.1, 0.1), angles=(-90, -90, 90))
+
+imshow_3d(np.sum(trd, axis=-1), title=f'{i}', rango=(-0.1, 0.1), angles=(-90, -90, 90))
+
+#%%
+trd2 = transformada_dipolet(gt)
+
+
+for i in range(trd.shape[-1]):
+    print(f'error capa {i}', np.round(rmse(trd2[..., i], trd[..., i], mask), 2))
+
+#%%
+
+i = 9
+imshow_3d(trd[..., i], title=f'{i}', rango=(-0.1, 0.1), angles=(-90, -90, 90))
+imshow_3d(trd2[..., i], title=f'{i}', rango=(-0.1, 0.1), angles=(-90, -90, 90))
