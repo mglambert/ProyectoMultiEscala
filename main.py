@@ -547,7 +547,7 @@ scale = np.pi / np.max(np.abs(phase))
 signal = magn * np.exp(1j * phase * scale)
 _rr = np.random.rand()
 
-snr = 50
+snr = 100
 
 signal = signal + ((1. / snr) * (np.random.randn(*signal.shape) + 1j * np.random.randn(*signal.shape)))
 
